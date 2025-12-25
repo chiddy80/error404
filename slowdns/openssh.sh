@@ -1,96 +1,166 @@
-#!/bin/bash
+#!/usr/bin/env python3
+"""
+OpenSSH + SlowDNS Installation Script
+Python version of the bash script
+"""
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
-NC='\033[0m'
+import os
+import subprocess
+import sys
+import time
+import shutil
+from pathlib import Path
 
-# SSH Port Configuration
-SSHD_PORT=22  # OpenSSH on standard port 22
-SLOWDNS_PORT=5300  # SlowDNS runs on port 5300
+# ================= CONFIG =================
+SSHD_PORT = 22
+SLOWDNS_PORT = 5300
 
-# Title Function
-print_title() {
-    clear
-    echo ""
-    echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${WHITE}   S L O W D N S   O P E N S S H${NC}"
-    echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${YELLOW}   Complete Installation Script${NC}"
-    echo -e "${CYAN}────────────────────────────────────────────────────────────────${NC}"
-    echo ""
-}
+# Download URLs
+SERVER_KEY_URL = "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.key"
+SERVER_KEY_ALT = "https://raw.githubusercontent.com/athumani2580/DNS/main/server.key"
+SERVER_PUB_URL = "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.pub"
+SERVER_PUB_ALT = "https://raw.githubusercontent.com/athumani2580/DNS/main/server.pub"
+SERVER_BIN_URL = "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
+SERVER_BIN_ALT = "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
 
-print() {
-    echo -e "${BLUE}[*]${NC} $1"
-}
+SLOWDNS_DIR = "/etc/slowdns"
+SLOWDNS_BIN = f"{SLOWDNS_DIR}/sldns-server"
 
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
+# ================= UTILITIES =================
+def print_message(msg, prefix="[+]"):
+    """Print colored message"""
+    colors = {
+        'green': '\033[92m',
+        'yellow': '\033[93m',
+        'cyan': '\033[96m',
+        'white': '\033[97m',
+        'red': '\033[91m',
+        'nc': '\033[0m',
+        'blue': '\033[94m'
+    }
+    print(f"{colors['cyan']}{prefix}{colors['nc']} {msg}")
 
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
+def print_success(msg):
+    print_message(msg, prefix="[✓]")
 
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
+def print_error(msg):
+    print_message(msg, prefix="[✗]")
 
-# Show title
-clear
-print_title
+def run_cmd(cmd, check=True, capture_output=True):
+    """Run shell command"""
+    try:
+        result = subprocess.run(cmd, shell=True, check=check, 
+                              capture_output=capture_output, text=True)
+        return result
+    except subprocess.CalledProcessError as e:
+        print_error(f"Command failed: {cmd}")
+        print_error(f"Error: {e.stderr}")
+        if check:
+            raise
+        return e
 
-# Get Server IP
-SERVER_IP=$(curl -s ifconfig.me)
-if [ -z "$SERVER_IP" ]; then
-    SERVER_IP=$(hostname -I | awk '{print $1}')
-fi
+def root_check():
+    """Check if running as root"""
+    if os.geteuid() != 0:
+        print_error("This script must be run as root")
+        sys.exit(1)
 
-# ====================================================
-# INSTALLATION PROCESS
-# ====================================================
+def service_is_active(service_name):
+    """Check if a systemd service is active"""
+    result = run_cmd(f"systemctl is-active {service_name}", check=False)
+    return result.returncode == 0
 
-print "Starting OpenSSH SlowDNS Installation..."
-echo ""
+def download_file(url, destination, alt_url=None):
+    """Download file with fallback URL"""
+    try:
+        print_message(f"Downloading {os.path.basename(destination)}...")
+        
+        # Try wget first
+        cmd = f"wget -q -O '{destination}' '{url}'"
+        result = run_cmd(cmd, check=False)
+        
+        if result.returncode != 0 and alt_url:
+            print_message("Trying alternative URL...")
+            cmd = f"wget -q -O '{destination}' '{alt_url}'"
+            result = run_cmd(cmd, check=False)
+        
+        if result.returncode == 0:
+            print_success(f"{os.path.basename(destination)} downloaded")
+            return True
+        else:
+            # Try curl as last resort
+            cmd = f"curl -s -o '{destination}' '{url}'"
+            result = run_cmd(cmd, check=False)
+            if result.returncode == 0:
+                print_success(f"{os.path.basename(destination)} downloaded")
+                return True
+        
+        print_error(f"Failed to download {os.path.basename(destination)}")
+        return False
+    except Exception as e:
+        print_error(f"Download error: {e}")
+        return False
 
-# Disable UFW
-print "Disabling UFW..."
-sudo ufw disable 2>/dev/null
-if systemctl is-active --quiet ufw; then
-    sudo systemctl stop ufw
-fi
-systemctl disable ufw 2>/dev/null
-print_success "UFW disabled"
-
-# Disable systemd-resolved
-print "Disabling systemd-resolved..."
-if systemctl is-active --quiet systemd-resolved; then
-    systemctl stop systemd-resolved
-fi
-systemctl disable systemd-resolved 2>/dev/null
-print_success "systemd-resolved disabled"
-
-# DNS config
-print "Configuring DNS..."
-if [ -L /etc/resolv.conf ]; then
-    rm -f /etc/resolv.conf
-fi
-echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
-chattr +i /etc/resolv.conf 2>/dev/null
-print_success "DNS configured"
-
-# Configure OpenSSH
-print "Configuring OpenSSH on port $SSHD_PORT..."
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
-cat > /etc/ssh/sshd_config << EOF
-# OpenSSH Configuration - Standard Port 22
-Port $SSHD_PORT
+# ================= MAIN INSTALLATION =================
+def main():
+    root_check()
+    
+    print("\n" + "="*60)
+    print("OpenSSH + SlowDNS Installation")
+    print("="*60)
+    
+    # ========== STEP 1: DISABLE UFW ==========
+    print("\n[1] Disabling UFW...")
+    run_cmd("ufw disable 2>/dev/null", check=False)
+    if service_is_active("ufw"):
+        run_cmd("systemctl stop ufw", check=False)
+    run_cmd("systemctl disable ufw 2>/dev/null", check=False)
+    print_success("UFW disabled")
+    
+    # ========== STEP 2: DISABLE systemd-resolved ==========
+    print("\n[2] Disabling systemd-resolved...")
+    if service_is_active("systemd-resolved"):
+        run_cmd("systemctl stop systemd-resolved", check=False)
+    run_cmd("systemctl disable systemd-resolved 2>/dev/null", check=False)
+    print_success("systemd-resolved disabled")
+    
+    # ========== STEP 3: CONFIGURE DNS ==========
+    print("\n[3] Configuring DNS...")
+    resolv_conf = Path("/etc/resolv.conf")
+    
+    # Remove if it's a symlink
+    if resolv_conf.is_symlink():
+        try:
+            resolv_conf.unlink()
+        except:
+            pass
+    
+    # Write new resolv.conf
+    try:
+        with open("/etc/resolv.conf", "w") as f:
+            f.write("nameserver 8.8.8.8\nnameserver 8.8.4.4\n")
+        
+        # Try to make it immutable (may fail, that's OK)
+        run_cmd("chattr +i /etc/resolv.conf 2>/dev/null", check=False)
+        print_success("DNS configured")
+    except Exception as e:
+        print_error(f"Failed to configure DNS: {e}")
+    
+    # ========== STEP 4: CONFIGURE OPENSSH ==========
+    print(f"\n[4] Configuring OpenSSH on port {SSHD_PORT}...")
+    
+    # Backup original config
+    ssh_config = "/etc/ssh/sshd_config"
+    if os.path.exists(ssh_config):
+        try:
+            shutil.copy2(ssh_config, ssh_config + ".backup")
+            print_success("Backed up original SSH config")
+        except:
+            pass
+    
+    # Create new SSH config
+    ssh_config_content = f"""# OpenSSH Configuration - Standard Port 22
+Port {SSHD_PORT}
 Protocol 2
 PermitRootLogin yes
 PubkeyAuthentication yes
@@ -112,180 +182,177 @@ MaxSessions 100
 MaxStartups 100:30:200
 LoginGraceTime 30
 UseDNS no
-EOF
-systemctl restart sshd
-sleep 2
-print_success "OpenSSH configured on port $SSHD_PORT"
-
-# Setup SlowDNS
-print "Setting up SlowDNS..."
-rm -rf /etc/slowdns
-mkdir -p /etc/slowdns
-print_success "SlowDNS directory created"
-
-# Download files
-print "Downloading SlowDNS files..."
-
-wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.key"
-if [ $? -eq 0 ]; then
-    print_success "✓ server.key downloaded"
-else
-    print "Trying alternative URL..."
-    wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/server.key"
-    print_success "✓ server.key downloaded"
-fi
-
-wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.pub"
-if [ $? -eq 0 ]; then
-    print_success "✓ server.pub downloaded"
-else
-    print "Trying alternative URL..."
-    wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/server.pub"
-    print_success "✓ server.pub downloaded"
-fi
-
-wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
-if [ $? -eq 0 ]; then
-    print_success "✓ sldns-server downloaded"
-else
-    print "Trying alternative URL..."
-    wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
-    print_success "✓ sldns-server downloaded"
-fi
-
-chmod +x /etc/slowdns/sldns-server
-print_success "File permissions set"
-
-# Get nameserver
-echo ""
-echo -e "${CYAN}[ NAMESERVER SETUP ]${NC}"
-echo -e "${WHITE}────────────────────────────────────────────────────────────────${NC}"
-read -p "Enter nameserver (e.g., dns.example.com): " NAMESERVER
-echo ""
-
-# Create SlowDNS service
-print "Creating SlowDNS service..."
-cat > /etc/systemd/system/server-sldns.service << EOF
-[Unit]
+"""
+    
+    try:
+        with open(ssh_config, "w") as f:
+            f.write(ssh_config_content)
+        
+        # Restart SSH
+        run_cmd("systemctl restart sshd", check=False)
+        time.sleep(2)
+        print_success(f"OpenSSH configured on port {SSHD_PORT}")
+    except Exception as e:
+        print_error(f"Failed to configure SSH: {e}")
+    
+    # ========== STEP 5: SETUP SLOWDNS ==========
+    print("\n[5] Setting up SlowDNS...")
+    
+    # Create directory
+    try:
+        shutil.rmtree(SLOWDNS_DIR, ignore_errors=True)
+        Path(SLOWDNS_DIR).mkdir(parents=True, exist_ok=True)
+        print_success("SlowDNS directory created")
+    except Exception as e:
+        print_error(f"Failed to create directory: {e}")
+        return
+    
+    # ========== STEP 6: DOWNLOAD FILES ==========
+    print("\n[6] Downloading SlowDNS files...")
+    
+    files_to_download = [
+        (SERVER_KEY_URL, f"{SLOWDNS_DIR}/server.key", SERVER_KEY_ALT),
+        (SERVER_PUB_URL, f"{SLOWDNS_DIR}/server.pub", SERVER_PUB_ALT),
+        (SERVER_BIN_URL, SLOWDNS_BIN, SERVER_BIN_ALT),
+    ]
+    
+    for url, dest, alt_url in files_to_download:
+        if not download_file(url, dest, alt_url):
+            print_error(f"Critical: Could not download {os.path.basename(dest)}")
+            return
+    
+    # Make binary executable
+    try:
+        os.chmod(SLOWDNS_BIN, 0o755)
+        print_success("File permissions set")
+    except Exception as e:
+        print_error(f"Failed to set permissions: {e}")
+    
+    # ========== STEP 7: GET NAMESERVER ==========
+    print("\n" + "="*60)
+    print("[ NAMESERVER SETUP ]")
+    print("="*60)
+    
+    nameserver = ""
+    while not nameserver:
+        try:
+            nameserver = input("Enter nameserver (e.g., dns.example.com): ").strip()
+            if not nameserver:
+                print_error("Nameserver cannot be empty")
+        except (EOFError, KeyboardInterrupt):
+            print_error("\nInstallation cancelled")
+            sys.exit(1)
+    
+    print(f"\n[7] Configuring with nameserver: {nameserver}")
+    
+    # ========== STEP 8: CREATE SLOWDNS SERVICE ==========
+    print("\n[8] Creating SlowDNS service...")
+    
+    service_content = f"""[Unit]
 Description=SlowDNS Server
-After=network.target sshd.service
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT
+User=root
+WorkingDirectory={SLOWDNS_DIR}
+ExecStart={SLOWDNS_BIN} -udp :{SLOWDNS_PORT} -mtu 1232 -privkey-file {SLOWDNS_DIR}/server.key {nameserver} 127.0.0.1:{SSHD_PORT}
 Restart=always
 RestartSec=5
-User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slowdns
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-EOF
-print_success "Service file created"
-
-# Startup config
-print "Setting up startup configuration..."
-cat > /etc/rc.local <<-END
-#!/bin/sh -e
-systemctl start sshd
-iptables -F
-iptables -X
-iptables -t nat -F
-iptables -t nat -X
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A OUTPUT -o lo -j ACCEPT
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -p tcp --dport $SSHD_PORT -j ACCEPT
-iptables -A INPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300
-iptables -A INPUT -p tcp --dport $SLOWDNS_PORT -j ACCEPT  # Port 5300 TCP
-iptables -A OUTPUT -p udp --dport $SLOWDNS_PORT -j ACCEPT
-iptables -A INPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
-iptables -A OUTPUT -s 127.0.0.1 -d 127.0.0.1 -j ACCEPT
-iptables -A INPUT -p icmp -j ACCEPT
-iptables -A OUTPUT -j ACCEPT
-iptables -A INPUT -m state --state INVALID -j DROP
-iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --set
-iptables -A INPUT -p tcp --dport $SSHD_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
-echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
-sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
-sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
-exit 0
-END
-chmod +x /etc/rc.local
-systemctl enable rc-local > /dev/null 2>&1
-systemctl start rc-local.service > /dev/null 2>&1
-print_success "Startup configuration set"
-
-# Disable IPv6
-print "Disabling IPv6..."
-echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
-sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1
-echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf
-echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf
-sysctl -p > /dev/null 2>&1
-print_success "IPv6 disabled"
-
-# Start SlowDNS service
-print "Starting SlowDNS service..."
-pkill sldns-server 2>/dev/null
-systemctl daemon-reload
-systemctl enable server-sldns > /dev/null 2>&1
-systemctl start server-sldns
-sleep 3
-
-if systemctl is-active --quiet server-sldns; then
-    print_success "SlowDNS service started"
+"""
     
-    # Test DNS functionality
-    print "Testing DNS functionality..."
-    sleep 2
-    # Test with port 5300 explicitly
-    if timeout 3 bash -c "echo > /dev/udp/127.0.0.1/$SLOWDNS_PORT" 2>/dev/null; then
-        print_success "SlowDNS is listening on port $SLOWDNS_PORT"
-    else
-        print_warning "SlowDNS not responding on port $SLOWDNS_PORT"
-        systemctl status server-sldns --no-pager
-    fi
-else
-    print_error "SlowDNS service failed to start"
-    systemctl status server-sldns --no-pager
-    # Try direct start as fallback
-    pkill sldns-server 2>/dev/null
-    /etc/slowdns/sldns-server -udp :$SLOWDNS_PORT -mtu 1232 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:$SSHD_PORT &
-    sleep 2
-    if pgrep -x "sldns-server" > /dev/null; then
-        print_success "SlowDNS started directly"
-    else
-        print_error "Failed to start SlowDNS"
-    fi
-fi
+    try:
+        with open("/etc/systemd/system/slowdns-server.service", "w") as f:
+            f.write(service_content)
+        
+        # Enable and start service
+        run_cmd("systemctl daemon-reload", check=False)
+        run_cmd("systemctl enable slowdns-server.service", check=False)
+        run_cmd("systemctl start slowdns-server.service", check=False)
+        
+        print_success("SlowDNS service created and started")
+    except Exception as e:
+        print_error(f"Failed to create service: {e}")
+    
+    # ========== STEP 9: FIREWALL CONFIGURATION ==========
+    print("\n[9] Configuring firewall...")
+    
+    # Clear existing rules
+    run_cmd("iptables -F 2>/dev/null", check=False)
+    run_cmd("iptables -t nat -F 2>/dev/null", check=False)
+    
+    # Allow SSH
+    run_cmd(f"iptables -A INPUT -p tcp --dport {SSHD_PORT} -j ACCEPT", check=False)
+    
+    # Allow SlowDNS
+    run_cmd(f"iptables -A INPUT -p udp --dport {SLOWDNS_PORT} -j ACCEPT", check=False)
+    
+    # Allow established connections
+    run_cmd("iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT", check=False)
+    
+    # Allow loopback
+    run_cmd("iptables -A INPUT -i lo -j ACCEPT", check=False)
+    
+    # Drop everything else
+    run_cmd("iptables -P INPUT DROP", check=False)
+    
+    # Save rules
+    run_cmd("iptables-save > /etc/iptables/rules.v4 2>/dev/null", check=False)
+    run_cmd("systemctl enable netfilter-persistent 2>/dev/null", check=False)
+    
+    print_success("Firewall configured")
+    
+    # ========== STEP 10: VERIFICATION ==========
+    print("\n[10] Verifying installation...")
+    
+    print("\nChecking services:")
+    services = ["sshd", "slowdns-server"]
+    for service in services:
+        if service_is_active(service):
+            print_success(f"{service} is running")
+        else:
+            print_error(f"{service} is NOT running")
+    
+    print("\nChecking ports:")
+    ports = [(SSHD_PORT, "tcp"), (SLOWDNS_PORT, "udp")]
+    for port, proto in ports:
+        result = run_cmd(f"ss -lnp{proto[0]} | grep -q ':{port}'", check=False)
+        if result.returncode == 0:
+            print_success(f"Port {port}/{proto} is listening")
+        else:
+            print_error(f"Port {port}/{proto} is NOT listening")
+    
+    # Show public key
+    pubkey_path = f"{SLOWDNS_DIR}/server.pub"
+    if os.path.exists(pubkey_path):
+        print("\n" + "="*60)
+        print("PUBLIC KEY (Copy for clients):")
+        print("="*60)
+        with open(pubkey_path, "r") as f:
+            print(f.read().strip())
+        print("="*60)
+    
+    # Final summary
+    print("\n" + "="*60)
+    print("INSTALLATION COMPLETE")
+    print("="*60)
+    print(f"Nameserver:    {nameserver}")
+    print(f"SSH Port:      {SSHD_PORT}")
+    print(f"SlowDNS Port:  {SLOWDNS_PORT}")
+    print(f"Public Key:    Saved in {pubkey_path}")
+    print("\nNext steps:")
+    print(f"1. Point NS record of {nameserver} to your server IP")
+    print("2. Test with: dig @$(curl -s ifconfig.me) test.${nameserver} TXT")
+    print("3. Check logs: journalctl -u slowdns-server -f")
+    print("="*60)
 
-# Clean up
-print "Cleaning up packages..."
-sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
-print_success "Packages cleaned"
-
-# Test connection
-print "Testing SSH connection..."
-if timeout 5 bash -c "echo > /dev/tcp/127.0.0.1/$SSHD_PORT" 2>/dev/null; then
-    print_success "SSH port $SSHD_PORT is accessible"
-else
-    print_error "SSH port $SSHD_PORT is not accessible"
-fi
-
-echo ""
-echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
-print_success "OpenSSH SlowDNS Installation Completed!"
-echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
-echo ""
-echo -e "${YELLOW}Important Note:${NC}"
-echo "SlowDNS is running on port $SLOWDNS_PORT (not 53)"
-echo "To test SlowDNS, you need to use:"
-echo "  dig @127.0.0.1 -p $SLOWDNS_PORT google.com"
-echo ""
-echo "To make SlowDNS work on port 53, you need to:"
-echo "1. Install EDNS Proxy (separate script)"
-echo "2. Or use iptables to redirect port 53 to $SLOWDNS_PORT"
-echo ""
+if __name__ == "__main__":
+    main()
